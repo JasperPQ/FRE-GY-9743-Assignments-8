@@ -201,13 +201,17 @@ class ValuationEngineProductRfrSwap(ValuationEngineProduct):
         self.cash_ = (
             self.fixed_leg_sign_ * self.fixed_cash_ + self.floating_leg_sign_ * self.float_cash_
         )
-        # TODO 2a: Set self.annuity_ to the fixed-leg annuity per unit notional.
-        # Use the nonzero fixed coupon and the fixed-leg PV already calculated.
-        raise NotImplementedError("TODO 2a: calculate the fixed-leg annuity")
+        # TODO 2a: fixed-leg PV = N * K * sum_i tau_i * P(T_i) = N * K * A,
+        # so the annuity per unit notional is A = PV_fixed / (N * K).
+        if self.fixed_rate_ == 0.0:
+            raise ValueError("The annuity is backed out of the fixed leg and needs a nonzero coupon.")
+        if self.notional_ == 0.0:
+            raise ValueError("The annuity per unit notional needs a nonzero notional.")
+        self.annuity_ = self.fixed_value_ / (self.fixed_rate_ * self.notional_)
 
-        # TODO 2b: Set self.par_rate_or_spread_ to the OIS par rate in decimals.
-        # Use the floating-leg PV and the annuity from TODO 2a.
-        raise NotImplementedError("TODO 2b: calculate the OIS par rate")
+        # TODO 2b: the par rate S equates both legs, N * S * A = PV_float,
+        # so S = PV_float / (N * A), in decimals.
+        self.par_rate_or_spread_ = self.float_value_ / (self.notional_ * self.annuity_)
 
     def calculate_first_order_risk(
         self, gradient=None, scaler: float = 1.0, accumulate: bool = False
@@ -238,10 +242,17 @@ class ValuationEngineProductRfrSwap(ValuationEngineProduct):
         local_grad = []
         self.model_.resize_gradient(local_grad)
 
-        # TODO 2c: Accumulate the OIS par-rate gradient with respect to X^I
-        # in local_grad. Apply the quotient rule using both leg engines,
-        # keeping the fixed coupon constant and the model's component order.
-        raise NotImplementedError("TODO 2c: calculate the OIS par-rate gradient")
+        # TODO 2c: S = K * PV_float / PV_fixed with K held constant, so
+        #   dS = K / PV_fixed * dPV_float - K * PV_float / PV_fixed^2 * dPV_fixed
+        #      = dPV_float / (N * A)      - S / PV_fixed            * dPV_fixed.
+        # Both leg engines write into the model's component-ordered blocks.
+        self.calculate_value()
+        self.floating_leg_engine_.calculate_first_order_risk(
+            local_grad, scaler=1.0 / (self.notional_ * self.annuity_), accumulate=True
+        )
+        self.fixed_leg_engine_.calculate_first_order_risk(
+            local_grad, scaler=-self.par_rate_or_spread_ / self.fixed_value_, accumulate=True
+        )
 
         return local_grad
 
